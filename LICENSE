@@ -20,6 +20,8 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-This licence covers the code and documentation in this repository. It does not
-cover the voice weights (en_US-shipscomputer-high.onnx and its .json); see
+This licence covers the code and documentation in this repository, with one
+exception: training/sft_12hz_patched.py is modified from Qwen's Qwen3-TTS and
+stays under the Apache License 2.0 (see its header and LICENSE-APACHE-2.0).
+It does not cover the voice weights (the v2.0.0 release archives); see
 VOICE-NOTICE.md.
