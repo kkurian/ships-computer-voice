@@ -2,7 +2,7 @@
 
 ## TL;DR
 
-A text-to-speech voice in the style of the Star Trek: The Next Generation ship's computer, plus a script that speaks with it, streamed. The voice ("version 1") is a fine-tune of Qwen3-TTS 0.6B, run on Apple silicon with mlx-audio. On an M1 it starts speaking 0.41 s after it is called (once loaded) and makes speech faster than real time (0.73 s of work per second of speech). Whisper reads all 7 bench lines back exactly. Training took 5 minutes on one rented NVIDIA A40; the whole pod session, including a failed first run, cost about $0.42.
+A text-to-speech voice in the style of the Star Trek: The Next Generation ship's computer, plus a script that speaks with it, streamed. The voice ("version 1") is a fine-tune of Qwen3-TTS 0.6B, run on Apple silicon with mlx-audio. On an M1 it starts speaking 0.41 s after it is called (once loaded) and makes speech faster than real time (0.73 s of work per second of speech). Whisper reads the 7 bench lines back exactly or nearly (0.98-1.00). Training took 5 minutes on one rented NVIDIA A40; the whole pod session, including a failed first run, cost about $0.42.
 
 ## Background
 
@@ -103,6 +103,7 @@ Apple M1, 16 GB, macOS 26, load average 1.9. `tools/bench.py --runs 3`, median o
 
 - Cold start (a new worker: load, warm-up, first request): 4.1 s to first audio with the model files in the disk cache, 8.7 s right after they were written. A cold load on an M1 laptop has taken 20 s.
 - Worker memory: 1.9 GiB resident.
+- A second run, from a fresh clone of this repository: 0.41 s median first audio, 0.77 s of work per second of speech.
 - In another run, with macOS's media-analysis service using most of a core, the voice slowed to 1.06 s of work per second of speech (four lines over 1.17 s). A stream that slow falls behind and stutters; the voice needs most of an idle M1.
 
 Intelligibility: Whisper small.en (`tools/readback.py`) transcribed each line; the score is word-sequence similarity to the input, ignoring case and punctuation (1.00 = exact).
@@ -117,7 +118,7 @@ Intelligibility: Whisper small.en (`tools/readback.py`) transcribed each line; t
 | "Project build complete…" | "Project Build Complete Three of four features passing." | 1.00 |
 | Status report | exact | 1.00 |
 
-Mean 1.00; 7 of 7 exact. Noise floor (`tools/noise.py`, the quietest 10% of 20 ms frames, before VOICE_FX): -111 dBFS mean, against speech at -17 dBFS; the pauses are near digital silence.
+Mean 1.00; 7 of 7 exact. A second run, from a fresh clone, scored 0.98: Whisper heard "signing key" as "sign-in key" (the voice samples, so each render differs a little). Noise floor (`tools/noise.py`, the quietest 10% of 20 ms frames, before VOICE_FX): -111 dBFS mean, against speech at -17 dBFS; the pauses are near digital silence.
 
 Not measured: older or newer Macs, Linux, listener ratings.
 
