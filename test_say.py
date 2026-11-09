@@ -144,6 +144,46 @@ class Frames(unittest.TestCase):
         self.assertEqual(say.read_frame(buf), (None, b""))
 
 
+class Socket(unittest.TestCase):
+    def test_default_socket_path_fits_sun_path_with_the_tmp_name(self):
+        old = os.environ.pop("SHIPS_COMPUTER_QWEN_RUN", None)
+        try:
+            _, sock, _ = say._worker_paths(Path("/any/model"), Path("/any/python"))
+        finally:
+            if old is not None:
+                os.environ["SHIPS_COMPUTER_QWEN_RUN"] = old
+        self.assertTrue(str(sock).startswith("/tmp/"))
+        self.assertLessEqual(len(os.fsencode(f"{sock}.9999999.tmp")), say.SUN_PATH_MAX)
+
+    def test_connect_reaches_a_socket_in_a_folder_too_long_for_sun_path(self):
+        import socket
+        with tempfile.TemporaryDirectory() as d:
+            deep = Path(d, "x" * 60, "y" * 60)
+            deep.mkdir(parents=True)
+            path = deep / "worker-0123456789.sock"
+            self.assertGreater(len(os.fsencode(str(path))), say.SUN_PATH_MAX)
+            cwd = os.getcwd()
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            os.chdir(deep)
+            try:
+                srv.bind(path.name)
+            finally:
+                os.chdir(cwd)
+            srv.listen(1)
+            with srv, say._connect(path):
+                pass
+            self.assertEqual(os.getcwd(), cwd)
+
+    def test_run_dir_must_be_private(self):
+        with tempfile.TemporaryDirectory() as d:
+            rd = Path(d, "run")
+            say.ensure_run_dir(rd)
+            self.assertEqual(rd.stat().st_mode & 0o777, 0o700)
+            rd.chmod(0o755)
+            with self.assertRaises(say.Unavailable):
+                say.ensure_run_dir(rd)
+
+
 class PrintText(unittest.TestCase):
     def run_say(self, *args, env=None, stdin=None):
         e = {k: v for k, v in os.environ.items() if not k.startswith("SHIPS_COMPUTER_")}

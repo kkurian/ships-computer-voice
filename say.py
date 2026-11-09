@@ -30,7 +30,7 @@ Environment:
   SHIPS_COMPUTER_QWEN_PYTHON   python of the venv holding mlx-audio (default:
                                .qwen/bin/python next to this file)
   SHIPS_COMPUTER_QWEN_RUN      folder for the worker's socket, state and JSONL logs
-                               (default: $TMPDIR/ships-computer-voice-<uid>)
+                               (default: /tmp/ships-computer-voice-<uid>)
   SHIPS_COMPUTER_QWEN_IDLE     seconds the worker waits for a request before
                                exiting (default: 600)
   SHIPS_COMPUTER_PRONOUNCE     extra pronunciation tables, colon-separated
@@ -48,7 +48,6 @@ import socket
 import struct
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -84,7 +83,17 @@ def run_dir() -> Path:
     explicit = os.environ.get("SHIPS_COMPUTER_QWEN_RUN")
     if explicit:
         return Path(explicit)
-    return Path(tempfile.gettempdir()) / f"ships-computer-voice-{os.getuid()}"
+    # /tmp, not $TMPDIR: macOS's $TMPDIR is long, and a Unix socket path must
+    # stay under 104 bytes.
+    return Path("/tmp") / f"ships-computer-voice-{os.getuid()}"
+
+
+def ensure_run_dir(rd: Path) -> None:
+    """Create the run folder (mode 0700), or refuse one another user could write."""
+    rd.mkdir(mode=0o700, parents=True, exist_ok=True)
+    st = rd.stat()
+    if st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise Unavailable(f"run folder {rd} is not private to this user (owner and mode 0700)")
 
 
 def voice_fx() -> str:
@@ -266,10 +275,23 @@ def _worker_paths(model: Path, python: Path) -> tuple:
     return rd, rd / f"worker-{wid}.sock", rd / f"worker-{wid}.err"
 
 
+SUN_PATH_MAX = 103   # bytes a Unix socket path may have on macOS (104 with the NUL)
+
+
 def _connect(path: Path) -> socket.socket:
+    """Connect to a Unix socket. A path too long for sun_path is reached by a
+    short relative name from its folder (the working directory is restored)."""
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        s.connect(str(path))
+        if len(os.fsencode(str(path))) <= SUN_PATH_MAX:
+            s.connect(str(path))
+        else:
+            cwd = os.getcwd()
+            os.chdir(path.parent)
+            try:
+                s.connect(path.name)
+            finally:
+                os.chdir(cwd)
     except OSError:
         s.close()
         raise
@@ -291,7 +313,7 @@ def connect_worker(model: Path, python: Path) -> socket.socket:
     if not os.access(python, os.X_OK):
         raise Unavailable(f"voice venv not found ({python})")
     rd, sock, err = _worker_paths(model, python)
-    rd.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ensure_run_dir(rd)
     try:
         return _connect(sock)
     except OSError:
@@ -536,7 +558,8 @@ def worker_main(model: Path, sock_path: Path) -> int:
     tmp = sock_path.with_name(f"{sock_path.name}.{os.getpid()}.tmp")
     if tmp.exists():
         tmp.unlink()
-    srv.bind(str(tmp))
+    os.chdir(rd)
+    srv.bind(tmp.name)   # relative: no sun_path limit on the folder's length
     os.chmod(tmp, 0o600)
     srv.listen(16)
     os.replace(tmp, sock_path)   # ready only once loaded: a connect means it can speak

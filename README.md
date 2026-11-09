@@ -50,7 +50,7 @@ echo "Working." | ./say.py
 - The audio passes through moderate compression, +5 dB and a limiter. Set `SHIPS_COMPUTER_VOICE_FX` to change the `ffmpeg` filter chain, or to `""` to turn it off. On macOS the player is `ffmpeg -f audiotoolbox`, not `ffplay`, which can clip the first syllable.
 - Pronunciation: whole words, case-insensitive, respelled from `pronounce.tsv`, then any `pronounce-*.tsv` beside it (your own; git ignores them), then the tables listed in `SHIPS_COMPUTER_PRONOUNCE` (colon-separated), then `--say-as WORD=RESPELLING` (repeatable). Later entries win. Capitals in a respelling mark stress; the voice does not spell them out.
 - Fallback: if the model, the venv or `ffmpeg` is missing, or the worker fails before the first audio, `say.py` says why on stderr and speaks with a macOS system voice (`say`), first of Allison (Enhanced), Samantha (Enhanced), Ava (Enhanced), Allison, Samantha, Kathy that is installed. `--out` and hints still apply. On other systems it exits 1.
-- `SHIPS_COMPUTER_QWEN_MODEL` and `SHIPS_COMPUTER_QWEN_PYTHON` override where the model and the venv's python are. `SHIPS_COMPUTER_QWEN_RUN` sets the folder for the worker's socket and its logs, one JSONL file per worker session (default `$TMPDIR/ships-computer-voice-<uid>`).
+- `SHIPS_COMPUTER_QWEN_MODEL` and `SHIPS_COMPUTER_QWEN_PYTHON` override where the model and the venv's python are. `SHIPS_COMPUTER_QWEN_RUN` sets the folder for the worker's socket and its logs, one JSONL file per worker session (default `/tmp/ships-computer-voice-<uid>`, private to you).
 - Tests: `python3 -m unittest -v test_say` (no model needed; runs on Linux too).
 
 ## How it was made
