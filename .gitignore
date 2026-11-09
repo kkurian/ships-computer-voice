@@ -1,9 +1,19 @@
 # Voice weights ship as release assets, not in git (see VOICE-NOTICE.md)
-*.onnx
-*.onnx.json
-SHA256SUMS
+ships-computer-v1-*/
+*.tar
+*.safetensors
 
-# Local engine venv
-.piper/
+# Local environments and tool output
+.qwen/
+.tools/
 __pycache__/
+bench-out/
+ft-output/
+
+# Your own pronunciation tables (see pronounce.tsv)
+pronounce-*.tsv
+
+# Audio and training data: never in git
 *.wav
+*.aiff
+/data/

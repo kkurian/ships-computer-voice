@@ -1,0 +1,26 @@
+# Pronunciation table for say.py.
+#
+# Format: one entry per line, the word, a TAB, then the respelling.
+#   word<TAB>respelling
+# Blank lines and lines starting with # are ignored. A line without exactly one
+# TAB is skipped with a warning on stderr.
+#
+# Matching:
+# - Case-insensitive, whole words only: "project" matches "Project" and
+#   "project's", not "projector". A word may be several words ("git log");
+#   any run of spaces in the text matches.
+# - Longer entries are tried first. Replacement is one pass, so a respelling
+#   is never matched again.
+# - The respelling is used as written. Its first letter is capitalised when
+#   the matched word starts with a capital. Capitals inside a respelling
+#   ("PRAH-ject") mark stress for the reader; the voice does not spell them out.
+# - There are no context rules: every match is replaced. For a word whose
+#   reading depends on context, give a per-request hint instead:
+#   say.py --say-as project=pruh-JECT "..."
+#
+# Order: this file, then each pronounce-*.tsv beside it, sorted by name (your
+# own tables; git ignores them, so they survive updates to this file), then
+# each table in SHIPS_COMPUTER_PRONOUNCE (colon-separated paths), then each
+# --say-as hint. A later entry for the same word wins.
+
+project	PRAH-ject

@@ -1,0 +1,13 @@
+# Fine-tuning on a Linux CUDA GPU host, installed by training/run_pod.sh on top of
+# the image's PyTorch (torch 2.8.0+cu128; torchaudio 2.8.0 from the cu128 index to
+# match), together with Qwen's own package, qwen-tts, from
+# https://github.com/QwenLM/Qwen3-TTS at commit 022e286b98fbec7e1e916cb940cdf532cd9f488e.
+# Exact versions as resolved on the training pod. Licences: qwen-tts Apache-2.0,
+# transformers Apache-2.0, accelerate Apache-2.0, huggingface_hub Apache-2.0,
+# torch/torchaudio BSD-3, numpy BSD-3, scipy BSD-3, soundfile BSD-3.
+transformers==4.57.3
+accelerate==1.12.0
+huggingface_hub==0.36.2
+numpy==2.1.2
+scipy==1.18.1
+soundfile==0.14.0

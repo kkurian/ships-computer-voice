@@ -1,3 +1,0 @@
-# The voice engine, installed into its own venv (.piper/) and run as a
-# separate program by say.py. Piper is GPL-3.0; never import or vendor it.
-piper-tts==1.8.0
