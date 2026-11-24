@@ -297,6 +297,54 @@ class Seed(unittest.TestCase):
         self.assertEqual([c[1] for c in voice.calls],
                          [say.chunk_seed(p, voice.model_id, voice.calls[0][2]) for p in parts])
 
+    def test_voice_seed_is_the_seed_for_every_chunk_plus_the_take(self):
+        st = settings(voice_seed=1701)
+        self.assertEqual(say.chunk_seed("Working.", "m", st), 1701)
+        self.assertEqual(say.chunk_seed("Something else entirely.", "m2", st), 1701)
+        self.assertEqual(say.chunk_seed("Working.", "m", settings(voice_seed=1701, take=2)), 1703)
+        self.assertEqual(say.chunk_seed("Working.", "m", settings(voice_seed=2 ** 32 - 1, take=1)), 0)
+
+    def test_no_voice_seed_leaves_settings_and_text_seeds_as_before(self):
+        self.assertNotIn("voice_seed", settings())
+        self.assertNotIn("voice_seed", settings(voice_seed=None))
+        self.assertNotEqual(say.chunk_seed("Working.", "m", settings()),
+                            say.chunk_seed("Working!", "m", settings()))
+
+    def test_voice_seed_reaches_every_chunk_and_keys_the_cache(self):
+        with tempfile.TemporaryDirectory() as d:
+            voice = FakeVoice()
+            text = " ".join(f"Sentence number {i} is here and it is fairly long." for i in range(20))
+            serve(voice, {"text": text, "cache": d, "voice_seed": 42})
+            self.assertGreater(len(voice.calls), 1)
+            self.assertEqual({c[1] for c in voice.calls}, {42})
+            n = len(voice.calls)
+            serve(voice, {"text": text, "cache": d, "voice_seed": 43})
+            self.assertEqual(len(voice.calls), 2 * n)
+            serve(voice, {"text": text, "cache": d, "voice_seed": 42})
+            self.assertEqual(len(voice.calls), 2 * n)
+
+    def test_resolve_voice_seed_numbers_names_and_errors(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = Path(d) / "voices.tsv"
+            t.write_text("# name<TAB>seed<TAB>note\nVega\t7\twarmer\nbad line\n")
+            self.assertIsNone(say.resolve_voice_seed(None, t))
+            self.assertIsNone(say.resolve_voice_seed("", t))
+            self.assertEqual(say.resolve_voice_seed("123", t), 123)
+            self.assertEqual(say.resolve_voice_seed("vega", t), 7)
+            self.assertEqual(say.resolve_voice_seed("VEGA", t), 7)
+            with self.assertRaises(ValueError):
+                say.resolve_voice_seed("rigel", t)
+            with self.assertRaises(ValueError):
+                say.resolve_voice_seed(str(2 ** 32), t)
+        voices, warnings = say.parse_voices("a\t1\nb\tx\nc\t-1\n")
+        self.assertEqual(voices, {"a": 1})
+        self.assertEqual(len(warnings), 2)
+
+    def test_shipped_voices_table_parses_cleanly(self):
+        voices, warnings = say.parse_voices(say.VOICES_TABLE.read_text(encoding="utf-8"))
+        self.assertEqual(warnings, [])
+        self.assertTrue(voices)
+
     def test_model_id_hashes_contents_and_uses_the_memo_only_when_files_match(self):
         with tempfile.TemporaryDirectory() as d:
             m = Path(d, "model")

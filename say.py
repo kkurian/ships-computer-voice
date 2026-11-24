@@ -6,6 +6,7 @@
     say.py --say-as project=PRAH-ject "..."    # a pronunciation hint for this request
     say.py --print-text "..."                  # print the text the voice will read
     say.py --take 1 --out reply.wav "Working." # a different take of the same line
+    say.py --voice-seed vega "Working."        # one fixed voice for every line
 
 The voice is a Qwen3-TTS fine-tune, run by mlx-audio on Apple silicon. It runs in
 a worker: a separate process, in its own venv, that loads the model on first use,
@@ -22,6 +23,11 @@ settings give the same audio. Sampling is cooler than the model's defaults
 render cache (.cache/ next to this file; SHIPS_COMPUTER_CACHE), so a line that
 did not change is replayed, not regenerated. With --out, each chunk is also
 brought to the same speech level before it is joined to the next.
+
+Voice seed: --voice-seed (or SHIPS_COMPUTER_VOICE_SEED) replaces the seed taken
+from the text with one fixed seed, a number or a name from voices.tsv next to
+this file, so every chunk of every line is sampled from the same seed (plus
+--take). The seed is part of the render cache's key.
 
 Pronunciation: pronounce.tsv next to this file, then each pronounce-*.tsv next
 to it (sorted by name; local tables, not in git), then each table named in
@@ -46,6 +52,7 @@ Environment:
   SHIPS_COMPUTER_VOICE_FX      ffmpeg audio filter chain; "" disables processing
   SHIPS_COMPUTER_CACHE         render cache folder (default: .cache/ next to this
                                file); "" disables the cache
+  SHIPS_COMPUTER_VOICE_SEED    default for --voice-seed (a number or a voices.tsv name)
 """
 from __future__ import annotations
 
@@ -67,6 +74,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 BUILTIN_TABLE = HERE / "pronounce.tsv"
+VOICES_TABLE = HERE / "voices.tsv"
 
 # Moderate compression (threshold -20 dB, 4:1, 5 ms attack, 80 ms release), a
 # fixed gain and a limiter. Fixed gain rather than loudnorm, which cannot measure
@@ -93,7 +101,7 @@ DEFAULT_TOP_P = 0.9
 DEFAULT_TOP_K = 50
 LANG_CODE = "auto"          # no language token, as training/sanity.py runs the voice
 STREAM_INTERVAL = 0.5       # seconds of audio per streamed piece
-WIRE_VERSION = 2            # bump when the request or the rendering changes
+WIRE_VERSION = 3            # bump when the request or the rendering changes
 SPEECH_LEVEL_DB = -19.5     # --out: each chunk's gated RMS level, dBFS (the model's typical level)
 
 
@@ -270,14 +278,19 @@ def token_cap(text: str) -> int:
 # ---------------------------------------------------------------------------
 # Repeatability: seeds, the render cache and chunk levels. Standard library only.
 
-def render_settings(base: dict, temperature: float, top_p: float, top_k: int, take: int) -> dict:
+def render_settings(base: dict, temperature: float, top_p: float, top_k: int, take: int,
+                    voice_seed: int | None = None) -> dict:
     """Everything besides the text and the model that decides a chunk's audio.
 
     `base` comes from the worker: speaker, language, streaming interval,
-    repetition penalty and the mlx / mlx-audio versions.
+    repetition penalty and the mlx / mlx-audio versions. `voice_seed`, when set,
+    is the seed for every chunk (see chunk_seed).
     """
-    return {**base, "temperature": float(temperature), "top_p": float(top_p),
-            "top_k": int(top_k), "take": int(take), "wire": WIRE_VERSION}
+    st = {**base, "temperature": float(temperature), "top_p": float(top_p),
+          "top_k": int(top_k), "take": int(take), "wire": WIRE_VERSION}
+    if voice_seed is not None:
+        st["voice_seed"] = int(voice_seed) % 2 ** 32
+    return st
 
 
 def _digest(text: str, model_id: str, settings: dict) -> bytes:
@@ -287,8 +300,51 @@ def _digest(text: str, model_id: str, settings: dict) -> bytes:
 
 
 def chunk_seed(text: str, model_id: str, settings: dict) -> int:
-    """The sampling seed for one chunk: 32 bits of a hash of what decides its audio."""
+    """The sampling seed for one chunk: the voice seed plus the take when one is
+    set, else 32 bits of a hash of what decides its audio."""
+    if settings.get("voice_seed") is not None:
+        return (settings["voice_seed"] + settings.get("take", 0)) % 2 ** 32
     return int.from_bytes(_digest(text, model_id, settings)[:4], "big")
+
+
+def parse_voices(text: str, source: str = "<voices>") -> tuple[dict, list]:
+    """voices.tsv: name<TAB>seed[<TAB>note] per line, # comments. Returns
+    ({lowercased name: seed}, warnings)."""
+    voices, warnings = {}, []
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        cols = line.split("\t")
+        try:
+            name, seed = cols[0].strip(), int(cols[1])
+            if not name or not 0 <= seed < 2 ** 32:
+                raise ValueError
+        except (IndexError, ValueError):
+            warnings.append(f"{source}:{n}: not name<TAB>seed (seed 0 to 2**32-1); skipped")
+            continue
+        voices[name.lower()] = seed
+    return voices, warnings
+
+
+def resolve_voice_seed(value: str | None, table: Path = VOICES_TABLE) -> int | None:
+    """A --voice-seed value as a seed: a number, or a name from voices.tsv.
+    None or "" means no voice seed. Raises ValueError for an unknown name."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    if re.fullmatch(r"\d+", value):
+        seed = int(value)
+        if seed >= 2 ** 32:
+            raise ValueError(f"voice seed {seed} is over 2**32-1")
+        return seed
+    voices, warnings = parse_voices(table.read_text(encoding="utf-8"), str(table)) \
+        if table.is_file() else ({}, [])
+    for w in warnings:
+        sys.stderr.write(f"say.py: {w}\n")
+    if value.lower() not in voices:
+        known = ", ".join(sorted(voices)) or f"none: {table} not found"
+        raise ValueError(f"unknown voice {value!r} (known: {known})")
+    return voices[value.lower()]
 
 
 def cache_key(text: str, model_id: str, settings: dict) -> str:
@@ -594,11 +650,12 @@ def connect_worker(model: Path, python: Path) -> socket.socket:
 
 def render_options(temperature: float = DEFAULT_TEMPERATURE, top_p: float = DEFAULT_TOP_P,
                    top_k: int = DEFAULT_TOP_K, take: int = 0, normalize: bool = False,
-                   cache: Path | None | bool = True) -> dict:
+                   cache: Path | None | bool = True, voice_seed: int | None = None) -> dict:
     """The request fields besides the text. cache=True means cache_dir()."""
     root = private_cache_dir() if cache is True else (cache or None)
     return {"temperature": temperature, "top_p": top_p, "top_k": top_k, "take": take,
-            "normalize": normalize, "cache": str(root) if root else None}
+            "voice_seed": voice_seed, "normalize": normalize,
+            "cache": str(root) if root else None}
 
 
 def open_stream(text: str, model: Path | None = None, python: Path | None = None,
@@ -924,7 +981,7 @@ def _serve(conn: socket.socket, voice, log) -> bool:
             raise ValueError("empty text")
         settings = render_settings(voice.base, req.get("temperature", DEFAULT_TEMPERATURE),
                                    req.get("top_p", DEFAULT_TOP_P), req.get("top_k", DEFAULT_TOP_K),
-                                   req.get("take", 0))
+                                   req.get("take", 0), req.get("voice_seed"))
         normalize = bool(req.get("normalize", False))
         cache = None
         if req.get("cache"):
@@ -961,7 +1018,7 @@ def _serve(conn: socket.socket, voice, log) -> bool:
     audio = samples / rate
     log("request", text=text, chars=len(text), first_audio_s=round(first, 3),
         total_s=round(total, 3), audio_s=round(audio, 2), rtf=round(total / audio, 3) if audio else None,
-        settings={k: settings[k] for k in ("temperature", "top_p", "top_k", "take")},
+        settings={k: settings.get(k) for k in ("temperature", "top_p", "top_k", "take", "voice_seed")},
         normalize=normalize, chunks=chunks)
     return True
 
@@ -985,6 +1042,11 @@ def main(argv: list | None = None) -> int:
                     help=f"sample from the k likeliest tokens (default {DEFAULT_TOP_K})")
     ap.add_argument("--take", type=int, default=0,
                     help="another take of the same text: a different seed (default 0)")
+    ap.add_argument("--voice-seed", default=os.environ.get("SHIPS_COMPUTER_VOICE_SEED"),
+                    metavar="SEED|NAME",
+                    help="one fixed seed for every chunk, in place of the one taken from the "
+                         "text: a number or a name from voices.tsv (default "
+                         "$SHIPS_COMPUTER_VOICE_SEED, else none)")
     ap.add_argument("--no-cache", action="store_true",
                     help="generate every chunk afresh and store nothing")
     norm = ap.add_mutually_exclusive_group()
@@ -1006,6 +1068,10 @@ def main(argv: list | None = None) -> int:
         print("stopped" if stop_worker() else "no worker running")
         return 0
     try:
+        voice_seed = resolve_voice_seed(a.voice_seed)
+    except ValueError as e:
+        ap.error(str(e))
+    try:
         table, warnings = load_tables(a.say_as, os.environ.get("SHIPS_COMPUTER_PRONOUNCE"))
     except ValueError as e:
         ap.error(str(e))
@@ -1022,7 +1088,7 @@ def main(argv: list | None = None) -> int:
     # measured first: normalising there would delay the first word by a chunk.
     options = render_options(a.temperature, a.top_p, a.top_k, a.take,
                              normalize=bool(a.out) if a.normalize is None else a.normalize,
-                             cache=not a.no_cache)
+                             cache=not a.no_cache, voice_seed=voice_seed)
     return 0 if speak(spoken, a.out, options) else 1
 
 
