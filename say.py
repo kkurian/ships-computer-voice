@@ -30,6 +30,13 @@ Voice seed: every chunk of every line is sampled from one fixed seed (plus
 from voices.tsv next to this file; "text" goes back to a seed taken from each
 chunk's text. The seed is part of the render cache's key.
 
+Anchor: with a voice seed, every chunk is also conditioned on that voice's own
+sample, the anchor passage (ANCHOR_TEXT) rendered with the voice seed, given to
+the model as an in-context reference with its transcript. A seed alone fixes
+the sampling, not the timbre; the anchor keeps new lines closer to the sample.
+The worker renders a voice's anchor once and keeps it in the render cache.
+--no-anchor (or SHIPS_COMPUTER_VOICE_ANCHOR=0) turns it off.
+
 Pronunciation: pronounce.tsv next to this file, then each pronounce-*.tsv next
 to it (sorted by name; local tables, not in git), then each table named in
 SHIPS_COMPUTER_PRONOUNCE, then each --say-as hint; later entries win. The format
@@ -55,6 +62,7 @@ Environment:
                                file); "" disables the cache
   SHIPS_COMPUTER_VOICE_SEED    default for --voice-seed (a number, a voices.tsv name
                                or "text"; default Antares, seed 4077)
+  SHIPS_COMPUTER_VOICE_ANCHOR  "0" turns the anchor off, as --no-anchor does
 """
 from __future__ import annotations
 
@@ -81,6 +89,15 @@ VOICES_TABLE = HERE / "voices.tsv"
 # Antares in voices.tsv, chosen by ear over four blind listening rounds.
 DEFAULT_VOICE = "Antares"
 DEFAULT_VOICE_SEED = 4077
+# Each voice's sample, and the anchor every chunk of that voice is conditioned on:
+# this passage rendered with the voice seed at the default sampling settings.
+ANCHOR_TEXT = ("Working. Diagnostic complete. All systems are functioning within normal "
+               "parameters. Warp core output is stable at ninety-eight percent. Long-range "
+               "sensors report no anomalies. Please state the nature of the request.")
+ANCHOR_VERSION = 1      # bump when the anchor's text or its use changes
+# An anchored chunk can open with up to 0.8 s of silence (the pause after the
+# anchor); trim_lead keeps this much before its first sound, as unanchored ones have.
+LEAD_KEEP_S = 0.12
 
 # Moderate compression (threshold -20 dB, 4:1, 5 ms attack, 80 ms release), a
 # fixed gain and a limiter. Fixed gain rather than loudnorm, which cannot measure
@@ -107,7 +124,7 @@ DEFAULT_TOP_P = 0.9
 DEFAULT_TOP_K = 50
 LANG_CODE = "auto"          # no language token, as training/sanity.py runs the voice
 STREAM_INTERVAL = 0.5       # seconds of audio per streamed piece
-WIRE_VERSION = 3            # bump when the request or the rendering changes
+WIRE_VERSION = 4            # bump when the request or the rendering changes
 SPEECH_LEVEL_DB = -19.5     # --out: each chunk's gated RMS level, dBFS (the model's typical level)
 
 
@@ -285,18 +302,28 @@ def token_cap(text: str) -> int:
 # Repeatability: seeds, the render cache and chunk levels. Standard library only.
 
 def render_settings(base: dict, temperature: float, top_p: float, top_k: int, take: int,
-                    voice_seed: int | None = None) -> dict:
+                    voice_seed: int | None = None, anchor: bool = False) -> dict:
     """Everything besides the text and the model that decides a chunk's audio.
 
     `base` comes from the worker: speaker, language, streaming interval,
     repetition penalty and the mlx / mlx-audio versions. `voice_seed`, when set,
-    is the seed for every chunk (see chunk_seed).
+    is the seed for every chunk (see chunk_seed); `anchor` then conditions every
+    chunk on that voice's anchor (anchor_settings). Without a voice seed there
+    is no anchor.
     """
     st = {**base, "temperature": float(temperature), "top_p": float(top_p),
           "top_k": int(top_k), "take": int(take), "wire": WIRE_VERSION}
     if voice_seed is not None:
         st["voice_seed"] = int(voice_seed) % 2 ** 32
+        if anchor:
+            st["anchor"] = ANCHOR_VERSION
     return st
+
+
+def anchor_settings(base: dict, voice_seed: int) -> dict:
+    """How a voice's anchor is rendered: ANCHOR_TEXT with the voice seed, take 0,
+    the default sampling settings and no anchor of its own."""
+    return render_settings(base, DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_TOP_K, 0, voice_seed)
 
 
 def _digest(text: str, model_id: str, settings: dict) -> bytes:
@@ -482,6 +509,29 @@ def speech_level_db(pcm: bytes, rate: int, gate_db: float = -50.0) -> float | No
     return 10 * math.log10(total / frames / 32768.0 ** 2)
 
 
+def trim_lead(pieces, rate: int, keep_s: float = LEAD_KEEP_S, gate_db: float = -45.0):
+    """s16le PCM pieces without their leading silence: from `keep_s` before the
+    first 10 ms frame above `gate_db` dBFS RMS. Pieces before that are held, not
+    sent; if none rises above the gate, everything is sent at the end."""
+    n = max(1, rate // 100)
+    gate = 32768.0 * 10 ** (gate_db / 20)
+    held = b""
+    for piece in pieces:
+        if held is None:
+            yield piece
+            continue
+        held += piece
+        x = _samples(held)
+        for i in range(0, len(x), n):
+            f = x[i:i + n]
+            if math.sqrt(sum(v * v for v in f) / len(f)) > gate:
+                yield held[max(0, i - int(rate * keep_s)) * 2:]
+                held = None
+                break
+    if held:
+        yield held
+
+
 def normalize_pcm(pcm: bytes, rate: int, target_db: float = SPEECH_LEVEL_DB,
                   max_gain_db: float = 12.0) -> bytes:
     """Scale one chunk so its speech level is `target_db`.
@@ -660,11 +710,12 @@ def connect_worker(model: Path, python: Path) -> socket.socket:
 
 def render_options(temperature: float = DEFAULT_TEMPERATURE, top_p: float = DEFAULT_TOP_P,
                    top_k: int = DEFAULT_TOP_K, take: int = 0, normalize: bool = False,
-                   cache: Path | None | bool = True, voice_seed: int | None = None) -> dict:
+                   cache: Path | None | bool = True, voice_seed: int | None = None,
+                   anchor: bool = True) -> dict:
     """The request fields besides the text. cache=True means cache_dir()."""
     root = private_cache_dir() if cache is True else (cache or None)
     return {"temperature": temperature, "top_p": top_p, "top_k": top_k, "take": take,
-            "voice_seed": voice_seed, "normalize": normalize,
+            "voice_seed": voice_seed, "anchor": anchor, "normalize": normalize,
             "cache": str(root) if root else None}
 
 
@@ -867,18 +918,59 @@ class Voice:
                      "streaming_interval": STREAM_INTERVAL,
                      "repetition_penalty": float(cfg.get("repetition_penalty", 1.05)),
                      "mlx": version("mlx"), "mlx_audio": version("mlx-audio")}
+        self._anchors = {}
+        tcfg = self.tts.config.talker_config
+        if self.tts.speaker_encoder is None and self.speaker in (tcfg.spk_id or {}):
+            # A fine-tune ("custom_voice") has no speaker encoder: its speaker is
+            # one fixed row of the codec embedding. mlx-audio's in-context
+            # (reference audio) path asks the encoder for the speaker; give it
+            # that row, so an anchored chunk keeps the fine-tune's speaker too.
+            row = self.tts.talker.get_input_embeddings()(mx.array([[tcfg.spk_id[self.speaker]]]))
+            row = row.reshape(1, -1)
+            self.tts.speaker_encoder = lambda mels: row
+            self.tts.extract_speaker_embedding = lambda audio, sr=24000: row
 
-    def generate(self, text: str, seed: int, settings: dict):
+    def anchor(self, voice_seed: int, cache: ChunkCache | None):
+        """The voice's anchor as model input: ANCHOR_TEXT rendered with the voice
+        seed (anchor_settings), as generated (not level-normalised). Rendered once, then
+        kept in memory and in the render cache."""
+        if voice_seed in self._anchors:
+            return self._anchors[voice_seed]
+        st = anchor_settings(self.base, voice_seed)
+        key = cache_key(ANCHOR_TEXT, self.model_id, st)
+        pcm = cache.get(key, self.rate) if cache else None
+        if pcm is None:
+            pcm = b"".join(self.generate(ANCHOR_TEXT, chunk_seed(ANCHOR_TEXT, self.model_id, st), st))
+            if cache:
+                cache.put(key, pcm, self.rate)
+        a = self._np.frombuffer(pcm, dtype="<i2").astype(self._np.float32)
+        self._anchors[voice_seed] = self._mx.array(a / 32767.0)
+        return self._anchors[voice_seed]
+
+    def generate(self, text: str, seed: int, settings: dict, cache: ChunkCache | None = None):
         """s16le PCM pieces for one chunk. The seed is set first, so the same
-        text, seed and settings sample the same tokens."""
-        self._mx.random.seed(seed)
+        text, seed and settings sample the same tokens. An anchored chunk
+        (settings["anchor"]) has its voice's anchor and transcript before it."""
+        common = dict(stream=True, streaming_interval=settings["streaming_interval"],
+                      max_tokens=token_cap(text), temperature=settings["temperature"],
+                      top_p=settings["top_p"], top_k=settings["top_k"],
+                      repetition_penalty=settings["repetition_penalty"])
+        if settings.get("anchor"):
+            ref = self.anchor(settings["voice_seed"], cache)
+            self._mx.random.seed(seed)
+            # _generate_icl directly: generate() takes the reference path only
+            # for base models, and raises the repetition penalty to 1.5 there.
+            stream = self.tts._generate_icl(text=text, ref_audio=ref, ref_text=ANCHOR_TEXT,
+                                            language=settings["lang_code"], **common)
+            yield from trim_lead(self._pcm(stream), self.rate)
+        else:
+            self._mx.random.seed(seed)
+            yield from self._pcm(self.tts.generate(text=text, voice=settings["speaker"],
+                                                   lang_code=settings["lang_code"], **common))
+
+    def _pcm(self, stream):
         np = self._np
-        for r in self.tts.generate(
-                text=text, voice=settings["speaker"], lang_code=settings["lang_code"],
-                stream=True, streaming_interval=settings["streaming_interval"],
-                max_tokens=token_cap(text), temperature=settings["temperature"],
-                top_p=settings["top_p"], top_k=settings["top_k"],
-                repetition_penalty=settings["repetition_penalty"]):
+        for r in stream:
             a = np.asarray(r.audio, dtype=np.float32)
             if a.size:
                 yield (np.clip(a, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
@@ -897,8 +989,15 @@ def worker_main(model: Path, sock_path: Path) -> int:
 
         # Warm-up: the first generation after loading compiles kernels and is
         # several times slower to first audio; pay that before taking requests.
-        warm = render_settings(voice.base, DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_TOP_K, 0)
-        for _ in voice.generate("Ready.", 0, warm):
+        # An anchored warm-up also readies the default voice's anchor (rendered
+        # once, then read from the render cache).
+        warm = render_settings(voice.base, DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_TOP_K, 0,
+                               DEFAULT_VOICE_SEED, anchor=True)
+        try:
+            warm_cache = ChunkCache(memo) if memo else None
+        except (Unavailable, OSError):
+            warm_cache = None
+        for _ in voice.generate("Ready.", 0, warm, warm_cache):
             pass
         log("loaded", load_s=round(loaded, 2), warmup_s=round(time.monotonic() - t0 - loaded, 2),
             speaker=voice.speaker, sample_rate=voice.rate, model_id=voice.model_id,
@@ -961,7 +1060,7 @@ def _render_chunk(voice, part: str, settings: dict, cache: ChunkCache | None, bu
 
     def pieces():
         got = []
-        for piece in voice.generate(part, seed, settings):
+        for piece in voice.generate(part, seed, settings, cache):
             got.append(piece)
             if not buffered:
                 yield piece
@@ -991,7 +1090,8 @@ def _serve(conn: socket.socket, voice, log) -> bool:
             raise ValueError("empty text")
         settings = render_settings(voice.base, req.get("temperature", DEFAULT_TEMPERATURE),
                                    req.get("top_p", DEFAULT_TOP_P), req.get("top_k", DEFAULT_TOP_K),
-                                   req.get("take", 0), req.get("voice_seed"))
+                                   req.get("take", 0), req.get("voice_seed"),
+                                   bool(req.get("anchor", True)))
         normalize = bool(req.get("normalize", False))
         cache = None
         if req.get("cache"):
@@ -1028,7 +1128,8 @@ def _serve(conn: socket.socket, voice, log) -> bool:
     audio = samples / rate
     log("request", text=text, chars=len(text), first_audio_s=round(first, 3),
         total_s=round(total, 3), audio_s=round(audio, 2), rtf=round(total / audio, 3) if audio else None,
-        settings={k: settings.get(k) for k in ("temperature", "top_p", "top_k", "take", "voice_seed")},
+        settings={k: settings.get(k) for k in ("temperature", "top_p", "top_k", "take", "voice_seed",
+                                               "anchor")},
         normalize=normalize, chunks=chunks)
     return True
 
@@ -1058,6 +1159,10 @@ def main(argv: list | None = None) -> int:
                          "from voices.tsv, or \"text\" for a seed from each chunk's text "
                          f"(default $SHIPS_COMPUTER_VOICE_SEED, else {DEFAULT_VOICE}, "
                          f"seed {DEFAULT_VOICE_SEED})")
+    ap.add_argument("--no-anchor", action="store_true",
+                    default=os.environ.get("SHIPS_COMPUTER_VOICE_ANCHOR") == "0",
+                    help="do not condition each chunk on the voice's own sample "
+                         "(default: anchored; SHIPS_COMPUTER_VOICE_ANCHOR=0 is the same)")
     ap.add_argument("--no-cache", action="store_true",
                     help="generate every chunk afresh and store nothing")
     norm = ap.add_mutually_exclusive_group()
@@ -1099,7 +1204,7 @@ def main(argv: list | None = None) -> int:
     # measured first: normalising there would delay the first word by a chunk.
     options = render_options(a.temperature, a.top_p, a.top_k, a.take,
                              normalize=bool(a.out) if a.normalize is None else a.normalize,
-                             cache=not a.no_cache, voice_seed=voice_seed)
+                             cache=not a.no_cache, voice_seed=voice_seed, anchor=not a.no_anchor)
     return 0 if speak(spoken, a.out, options) else 1
 
 
