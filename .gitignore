@@ -8,6 +8,7 @@ ships-computer-v1-*/
 .tools/
 __pycache__/
 bench-out/
+.cache/
 ft-output/
 
 # Your own pronunciation tables (see pronounce.tsv)

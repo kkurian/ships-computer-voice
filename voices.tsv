@@ -1,0 +1,23 @@
+# Named voice seeds for say.py --voice-seed NAME (or SHIPS_COMPUTER_VOICE_SEED).
+#
+# Format: name<TAB>seed<TAB>note, one per line; # starts a comment. Names are
+# case-insensitive; seeds are 0 to 2**32-1. A voice seed is the sampling seed for
+# every chunk of every line. On three short lines tried with four seeds, the
+# centroid and pitch moved more with the text than with the seed: the notes below
+# describe that one passage, not every line.
+#
+# Antares is the default voice (say.py DEFAULT_VOICE_SEED), chosen by ear over
+# four blind listening rounds.
+#
+# Notes are from measurements of one 14-16 s passage (spectral centroid, median
+# pitch), relative to the other nine; they were not chosen by ear.
+Aldebaran	1	warmer: centroid 451 Hz, median pitch 205.1 Hz
+Vega	7	deeper: centroid 475 Hz, median pitch 175.2 Hz
+Rigel	42	warmer: centroid 425 Hz, median pitch 184.6 Hz
+Deneb	108	brighter: centroid 512 Hz, median pitch 184.6 Hz
+Altair	1701	warmer: centroid 460 Hz, median pitch 173.9 Hz
+Sirius	1864	higher: centroid 494 Hz, median pitch 198.3 Hz
+Polaris	2364	brighter: centroid 508 Hz, median pitch 200.0 Hz
+Antares	4077	brighter: centroid 512 Hz, median pitch 192.0 Hz
+Capella	8472	middle: centroid 464 Hz, median pitch 184.6 Hz
+Arcturus	74656	middle: centroid 460 Hz, median pitch 193.5 Hz
