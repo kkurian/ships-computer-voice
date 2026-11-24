@@ -245,7 +245,7 @@ class FakeVoice:
     def __init__(self):
         self.calls = []
 
-    def generate(self, text, seed, st):
+    def generate(self, text, seed, st, cache=None):
         self.calls.append((text, seed, st))
         rng = random.Random(f"{text}|{seed}")
         for _ in range(3):
@@ -322,6 +322,51 @@ class Seed(unittest.TestCase):
             self.assertEqual(len(voice.calls), 2 * n)
             serve(voice, {"text": text, "cache": d, "voice_seed": 42})
             self.assertEqual(len(voice.calls), 2 * n)
+
+    def test_anchor_only_with_a_voice_seed_and_it_keys_the_cache(self):
+        self.assertEqual(settings(voice_seed=7, anchor=True)["anchor"], say.ANCHOR_VERSION)
+        self.assertNotIn("anchor", settings(voice_seed=7))
+        self.assertNotIn("anchor", settings(anchor=True))   # "text" seeds: nothing to anchor to
+        self.assertNotEqual(say.cache_key("Working.", "m", settings(voice_seed=7, anchor=True)),
+                            say.cache_key("Working.", "m", settings(voice_seed=7)))
+
+    def test_anchor_settings_are_the_voice_sample_render(self):
+        st = say.anchor_settings(BASE, 4077)
+        self.assertEqual((st["voice_seed"], st["take"], st["temperature"], st["top_p"], st["top_k"]),
+                         (4077, 0, say.DEFAULT_TEMPERATURE, say.DEFAULT_TOP_P, say.DEFAULT_TOP_K))
+        self.assertNotIn("anchor", st)
+        self.assertEqual(say.chunk_seed(say.ANCHOR_TEXT, "m", st), 4077)
+
+    def test_requests_are_anchored_unless_asked_not_to(self):
+        for req, want in (({}, say.ANCHOR_VERSION), ({"anchor": True}, say.ANCHOR_VERSION),
+                          ({"anchor": False}, None)):
+            voice = FakeVoice()
+            serve(voice, {"text": "Working.", "cache": None, "voice_seed": 4077, **req})
+            self.assertEqual(voice.calls[0][2].get("anchor"), want, req)
+
+    def test_cli_anchor_on_by_default_off_by_flag_or_env(self):
+        def anchor(argv, env_value):
+            env = {k: v for k, v in os.environ.items() if k != "SHIPS_COMPUTER_VOICE_ANCHOR"}
+            if env_value is not None:
+                env["SHIPS_COMPUTER_VOICE_ANCHOR"] = env_value
+            with unittest.mock.patch.dict(os.environ, env, clear=True), \
+                    unittest.mock.patch.object(say, "speak", return_value=True) as speak:
+                self.assertEqual(say.main(argv + ["--no-cache", "Working."]), 0)
+            return speak.call_args[0][2]["anchor"]
+        self.assertTrue(anchor([], None))
+        self.assertTrue(anchor([], "1"))
+        self.assertFalse(anchor(["--no-anchor"], None))
+        self.assertFalse(anchor([], "0"))
+
+    def test_trim_lead_drops_leading_silence_and_keeps_the_rest(self):
+        rate = 8000
+        quiet, loud = say.array("h", [0] * 8000), say.array("h", [8000, -8000] * 2000)
+        pcm = quiet.tobytes() + loud.tobytes() + quiet.tobytes()
+        pieces = [pcm[i:i + 4000] for i in range(0, len(pcm), 4000)]   # 0.25 s each
+        out = b"".join(say.trim_lead(iter(pieces), rate, keep_s=0.1))
+        self.assertEqual(out, pcm[(8000 - 800) * 2:])
+        self.assertEqual(b"".join(say.trim_lead(iter([quiet.tobytes()]), rate)), quiet.tobytes())
+        self.assertEqual(b"".join(say.trim_lead(iter([loud.tobytes()]), rate)), loud.tobytes())
 
     def test_resolve_voice_seed_numbers_names_and_errors(self):
         with tempfile.TemporaryDirectory() as d:
@@ -566,7 +611,7 @@ class Level(unittest.TestCase):
 
     def test_normalize_request_levels_each_whole_chunk(self):
         class Two(FakeVoice):
-            def generate(self, text, seed, st):
+            def generate(self, text, seed, st, cache=None):
                 self.calls.append(text)
                 yield tone(0.5, self.rate, -30 if text.startswith("Quiet") else -12)
         voice = Two()
