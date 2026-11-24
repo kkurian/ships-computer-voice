@@ -4,6 +4,9 @@
 # case-insensitive; seeds are 0 to 2**32-1. A voice seed is the sampling seed for
 # every chunk of every line, so a chosen take holds across texts.
 #
+# Antares is the default voice (say.py DEFAULT_VOICE_SEED), chosen by ear over
+# four blind listening rounds.
+#
 # Notes are from measurements of one 14-16 s passage (spectral centroid, median
 # pitch), relative to the other nine; they were not chosen by ear.
 Aldebaran	1	warmer: centroid 451 Hz, median pitch 205.1 Hz

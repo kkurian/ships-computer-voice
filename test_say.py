@@ -327,8 +327,10 @@ class Seed(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             t = Path(d) / "voices.tsv"
             t.write_text("# name<TAB>seed<TAB>note\nVega\t7\twarmer\nbad line\n")
-            self.assertIsNone(say.resolve_voice_seed(None, t))
-            self.assertIsNone(say.resolve_voice_seed("", t))
+            self.assertEqual(say.resolve_voice_seed(None, t), say.DEFAULT_VOICE_SEED)
+            self.assertEqual(say.resolve_voice_seed("", t), say.DEFAULT_VOICE_SEED)
+            self.assertIsNone(say.resolve_voice_seed("text", t))
+            self.assertIsNone(say.resolve_voice_seed("TEXT", t))
             self.assertEqual(say.resolve_voice_seed("123", t), 123)
             self.assertEqual(say.resolve_voice_seed("vega", t), 7)
             self.assertEqual(say.resolve_voice_seed("VEGA", t), 7)
@@ -344,6 +346,42 @@ class Seed(unittest.TestCase):
         voices, warnings = say.parse_voices(say.VOICES_TABLE.read_text(encoding="utf-8"))
         self.assertEqual(warnings, [])
         self.assertTrue(voices)
+
+    def test_default_voice_is_antares_and_needs_no_table(self):
+        self.assertEqual((say.DEFAULT_VOICE, say.DEFAULT_VOICE_SEED), ("Antares", 4077))
+        voices, _ = say.parse_voices(say.VOICES_TABLE.read_text(encoding="utf-8"))
+        self.assertEqual(voices[say.DEFAULT_VOICE.lower()], say.DEFAULT_VOICE_SEED)
+        missing = Path(tempfile.gettempdir()) / "no-such-dir" / "voices.tsv"
+        self.assertEqual(say.resolve_voice_seed(None, missing), 4077)
+
+    def _cli_voice_seed(self, argv, env_value):
+        """The voice_seed main() hands to speak() for argv, with SHIPS_COMPUTER_VOICE_SEED
+        set to env_value (None: unset)."""
+        env = {k: v for k, v in os.environ.items() if k != "SHIPS_COMPUTER_VOICE_SEED"}
+        if env_value is not None:
+            env["SHIPS_COMPUTER_VOICE_SEED"] = env_value
+        with unittest.mock.patch.dict(os.environ, env, clear=True), \
+                unittest.mock.patch.object(say, "speak", return_value=True) as speak:
+            self.assertEqual(say.main(argv + ["--no-cache", "Working."]), 0)
+        return speak.call_args[0][2]["voice_seed"]
+
+    def test_cli_default_is_antares_and_flag_or_env_overrides(self):
+        self.assertEqual(self._cli_voice_seed([], None), 4077)
+        self.assertEqual(self._cli_voice_seed([], ""), 4077)
+        self.assertEqual(self._cli_voice_seed(["--voice-seed", "vega"], None), 7)
+        self.assertEqual(self._cli_voice_seed(["--voice-seed", "123"], None), 123)
+        self.assertEqual(self._cli_voice_seed([], "rigel"), 42)
+        self.assertEqual(self._cli_voice_seed(["--voice-seed", "1701"], "rigel"), 1701)
+        self.assertIsNone(self._cli_voice_seed(["--voice-seed", "text"], None))
+
+    def test_default_voice_renders_the_same_text_identically(self):
+        text = " ".join(f"Sentence number {i} is here and it is fairly long." for i in range(20))
+        req = {"text": text, **say.render_options(cache=None, voice_seed=say.resolve_voice_seed(None))}
+        a, b = FakeVoice(), FakeVoice()
+        pcm_a, pcm_b = serve(a, dict(req)), serve(b, dict(req))
+        self.assertGreater(len(pcm_a), 0)
+        self.assertEqual(pcm_a, pcm_b)
+        self.assertEqual({c[1] for c in a.calls}, {4077})
 
     def test_model_id_hashes_contents_and_uses_the_memo_only_when_files_match(self):
         with tempfile.TemporaryDirectory() as d:
@@ -592,6 +630,21 @@ print(json.dumps({"same": a == b, "n": len(a), "other_seed_differs": a != c}))
         self.assertGreater(res["n"], 0)
         self.assertTrue(res["same"], "two renders with one seed differ")
         self.assertTrue(res["other_seed_differs"])
+
+    def test_default_voice_renders_one_line_to_identical_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = {k: v for k, v in os.environ.items() if k != "SHIPS_COMPUTER_VOICE_SEED"}
+            outs = []
+            for n in (1, 2):
+                out = Path(d) / f"{n}.wav"
+                r = subprocess.run([sys.executable, str(HERE / "say.py"), "--no-cache", "--out", str(out),
+                                    "Good morning. You have three briefs waiting."],
+                                   capture_output=True, text=True, timeout=600, env=env)
+                self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+                self.assertNotIn("macOS voice", r.stderr)
+                outs.append(out.read_bytes())
+            self.assertGreater(len(outs[0]), 1000)
+            self.assertEqual(outs[0], outs[1], "two default-voice renders of one line differ")
 
 if __name__ == "__main__":
     unittest.main()

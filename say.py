@@ -6,7 +6,7 @@
     say.py --say-as project=PRAH-ject "..."    # a pronunciation hint for this request
     say.py --print-text "..."                  # print the text the voice will read
     say.py --take 1 --out reply.wav "Working." # a different take of the same line
-    say.py --voice-seed vega "Working."        # one fixed voice for every line
+    say.py --voice-seed vega "Working."        # another voice from voices.tsv
 
 The voice is a Qwen3-TTS fine-tune, run by mlx-audio on Apple silicon. It runs in
 a worker: a separate process, in its own venv, that loads the model on first use,
@@ -24,10 +24,11 @@ render cache (.cache/ next to this file; SHIPS_COMPUTER_CACHE), so a line that
 did not change is replayed, not regenerated. With --out, each chunk is also
 brought to the same speech level before it is joined to the next.
 
-Voice seed: --voice-seed (or SHIPS_COMPUTER_VOICE_SEED) replaces the seed taken
-from the text with one fixed seed, a number or a name from voices.tsv next to
-this file, so every chunk of every line is sampled from the same seed (plus
---take). The seed is part of the render cache's key.
+Voice seed: every chunk of every line is sampled from one fixed seed (plus
+--take), so one voice holds across texts. The default is Antares, seed 4077.
+--voice-seed (or SHIPS_COMPUTER_VOICE_SEED) picks another: a number or a name
+from voices.tsv next to this file; "text" goes back to a seed taken from each
+chunk's text. The seed is part of the render cache's key.
 
 Pronunciation: pronounce.tsv next to this file, then each pronounce-*.tsv next
 to it (sorted by name; local tables, not in git), then each table named in
@@ -52,7 +53,8 @@ Environment:
   SHIPS_COMPUTER_VOICE_FX      ffmpeg audio filter chain; "" disables processing
   SHIPS_COMPUTER_CACHE         render cache folder (default: .cache/ next to this
                                file); "" disables the cache
-  SHIPS_COMPUTER_VOICE_SEED    default for --voice-seed (a number or a voices.tsv name)
+  SHIPS_COMPUTER_VOICE_SEED    default for --voice-seed (a number, a voices.tsv name
+                               or "text"; default Antares, seed 4077)
 """
 from __future__ import annotations
 
@@ -75,6 +77,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 BUILTIN_TABLE = HERE / "pronounce.tsv"
 VOICES_TABLE = HERE / "voices.tsv"
+# The voice used when neither --voice-seed nor SHIPS_COMPUTER_VOICE_SEED is set:
+# Antares in voices.tsv, chosen by ear over four blind listening rounds.
+DEFAULT_VOICE = "Antares"
+DEFAULT_VOICE_SEED = 4077
 
 # Moderate compression (threshold -20 dB, 4:1, 5 ms attack, 80 ms release), a
 # fixed gain and a limiter. Fixed gain rather than loudnorm, which cannot measure
@@ -328,9 +334,13 @@ def parse_voices(text: str, source: str = "<voices>") -> tuple[dict, list]:
 
 def resolve_voice_seed(value: str | None, table: Path = VOICES_TABLE) -> int | None:
     """A --voice-seed value as a seed: a number, or a name from voices.tsv.
-    None or "" means no voice seed. Raises ValueError for an unknown name."""
+    None or "" means the default voice (DEFAULT_VOICE_SEED, which needs no
+    table); "text" means no voice seed, a seed from each chunk's text. Raises
+    ValueError for an unknown name."""
     value = (value or "").strip()
     if not value:
+        return DEFAULT_VOICE_SEED
+    if value.lower() == "text":
         return None
     if re.fullmatch(r"\d+", value):
         seed = int(value)
@@ -1044,9 +1054,10 @@ def main(argv: list | None = None) -> int:
                     help="another take of the same text: a different seed (default 0)")
     ap.add_argument("--voice-seed", default=os.environ.get("SHIPS_COMPUTER_VOICE_SEED"),
                     metavar="SEED|NAME",
-                    help="one fixed seed for every chunk, in place of the one taken from the "
-                         "text: a number or a name from voices.tsv (default "
-                         "$SHIPS_COMPUTER_VOICE_SEED, else none)")
+                    help="the voice: one fixed seed for every chunk, a number or a name "
+                         "from voices.tsv, or \"text\" for a seed from each chunk's text "
+                         f"(default $SHIPS_COMPUTER_VOICE_SEED, else {DEFAULT_VOICE}, "
+                         f"seed {DEFAULT_VOICE_SEED})")
     ap.add_argument("--no-cache", action="store_true",
                     help="generate every chunk afresh and store nothing")
     norm = ap.add_mutually_exclusive_group()
