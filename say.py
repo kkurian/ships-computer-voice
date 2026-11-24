@@ -114,12 +114,52 @@ def run_dir() -> Path:
     return Path("/tmp") / f"ships-computer-voice-{os.getuid()}"
 
 
+def ensure_private_dir(d: Path, what: str = "folder") -> None:
+    """Create `d` (mode 0700), or refuse one owned by another user or open to group
+    or other. Folders it has to create above `d` get mode 0700 too."""
+    for parent in reversed(d.parents):
+        if not parent.exists():
+            parent.mkdir(mode=0o700, exist_ok=True)
+    d.mkdir(mode=0o700, exist_ok=True)
+    st = d.lstat()
+    if not os.path.isdir(d) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise Unavailable(f"{what} {d} is not private to this user (owner and mode 0700)")
+
+
 def ensure_run_dir(rd: Path) -> None:
     """Create the run folder (mode 0700), or refuse one another user could write."""
-    rd.mkdir(mode=0o700, parents=True, exist_ok=True)
-    st = rd.stat()
-    if st.st_uid != os.getuid() or st.st_mode & 0o077:
-        raise Unavailable(f"run folder {rd} is not private to this user (owner and mode 0700)")
+    ensure_private_dir(rd, "run folder")
+
+
+def private_cache_dir() -> Path | None:
+    """cache_dir(), if it is private to this user (created mode 0700 if missing);
+    None, with a warning on stderr, if it is not."""
+    root = cache_dir()
+    if root is None:
+        return None
+    try:
+        ensure_private_dir(root, "render cache folder")
+    except (Unavailable, OSError) as e:
+        sys.stderr.write(f"say.py: {e}; rendering without the cache\n")
+        return None
+    return root
+
+
+def _write_private(path: Path, write) -> None:
+    """Write a file (mode 0600) atomically: `write(fileobj)` fills a new temp file
+    beside `path`, created exclusively, then it replaces `path`."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            write(f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def voice_fx() -> str:
@@ -285,25 +325,23 @@ def model_id(model: Path, memo: Path | None = None) -> str:
     digest = h.hexdigest()
     if memo is not None:
         try:
-            memo.parent.mkdir(parents=True, exist_ok=True)
-            tmp = memo.with_name(f"{memo.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps({"stamp": stamp, "model_id": digest}))
-            os.replace(tmp, memo)
-        except OSError:
+            ensure_private_dir(memo.parent, "render cache folder")
+            blob = json.dumps({"stamp": stamp, "model_id": digest}).encode()
+            _write_private(memo, lambda f: f.write(blob))
+        except (OSError, Unavailable):
             pass
     return digest
 
 
 def wav_write(path: Path, pcm: bytes, rate: int) -> None:
-    """Write s16le mono PCM as a WAV file, atomically."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    with wave.open(str(tmp), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        w.writeframes(pcm)
-    os.replace(tmp, path)
+    """Write s16le mono PCM as a WAV file (mode 0600), atomically."""
+    def write(f):
+        with wave.open(f, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(pcm)
+    _write_private(path, write)
 
 
 def wav_read(path: Path) -> tuple:
@@ -315,25 +353,38 @@ def wav_read(path: Path) -> tuple:
 
 
 class ChunkCache:
-    """One WAV per generated chunk, named by cache_key, in one folder."""
+    """One WAV per generated chunk, named by cache_key, in one folder.
+
+    The folder and every folder in it are mode 0700 and the files 0600: the
+    cache holds what was said. A folder owned by another user, or open to group
+    or other, is refused (Unavailable).
+    """
 
     def __init__(self, root: Path):
+        ensure_private_dir(root, "render cache folder")
         self.root = root
 
     def path(self, key: str) -> Path:
         return self.root / "chunks" / key[:2] / f"{key}.wav"
 
     def get(self, key: str, rate: int) -> bytes | None:
+        path = self.path(key)
         try:
-            r, pcm = wav_read(self.path(key))
+            st = path.lstat()
+            if st.st_uid != os.getuid() or st.st_mode & 0o022 or not path.is_file():
+                return None   # not a file this user wrote: generate instead
+            r, pcm = wav_read(path)
         except (OSError, ValueError, EOFError, wave.Error):
             return None
         return pcm if r == rate and pcm else None
 
     def put(self, key: str, pcm: bytes, rate: int) -> None:
+        path = self.path(key)
         try:
-            wav_write(self.path(key), pcm, rate)
-        except OSError:
+            for d in (path.parent.parent, path.parent):
+                ensure_private_dir(d, "render cache folder")
+            wav_write(path, pcm, rate)
+        except (OSError, Unavailable):
             pass   # a cache that cannot be written only costs a regeneration
 
 
@@ -545,7 +596,7 @@ def render_options(temperature: float = DEFAULT_TEMPERATURE, top_p: float = DEFA
                    top_k: int = DEFAULT_TOP_K, take: int = 0, normalize: bool = False,
                    cache: Path | None | bool = True) -> dict:
     """The request fields besides the text. cache=True means cache_dir()."""
-    root = cache_dir() if cache is True else (cache or None)
+    root = private_cache_dir() if cache is True else (cache or None)
     return {"temperature": temperature, "top_p": top_p, "top_k": top_k, "take": take,
             "normalize": normalize, "cache": str(root) if root else None}
 
@@ -773,7 +824,7 @@ def worker_main(model: Path, sock_path: Path) -> int:
     log("start", pid=os.getpid(), model=str(model), python=sys.executable, idle_s=idle)
     t0 = time.monotonic()
     try:
-        memo = cache_dir()
+        memo = private_cache_dir()
         voice = Voice(model, memo / "model-id.json" if memo else None)
         loaded = time.monotonic() - t0
 
@@ -875,7 +926,12 @@ def _serve(conn: socket.socket, voice, log) -> bool:
                                    req.get("top_p", DEFAULT_TOP_P), req.get("top_k", DEFAULT_TOP_K),
                                    req.get("take", 0))
         normalize = bool(req.get("normalize", False))
-        cache = ChunkCache(Path(req["cache"])) if req.get("cache") else None
+        cache = None
+        if req.get("cache"):
+            try:
+                cache = ChunkCache(Path(req["cache"]))
+            except (Unavailable, OSError) as e:
+                log("cache_refused", error=str(e))
         for part in split_text(text):
             info, pieces = _render_chunk(voice, part, settings, cache, buffered=normalize)
             for pcm in pieces:

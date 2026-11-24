@@ -10,6 +10,7 @@ import random
 import re
 import socket
 import threading
+import unittest.mock
 import os
 import subprocess
 import sys
@@ -381,6 +382,72 @@ class Cache(unittest.TestCase):
             pcm = serve(voice, {"text": "Working.", "cache": d})
             [f] = Path(d).rglob("*.wav")
             self.assertEqual(say.wav_read(f), (voice.rate, pcm))
+
+
+class CachePrivacy(unittest.TestCase):
+    def mode(self, path):
+        return path.stat().st_mode & 0o777
+
+    def test_cache_folders_are_0700_and_files_0600_whatever_the_umask(self):
+        old = os.umask(0o000)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d, "a", "cache")
+                pcm = serve(FakeVoice(), {"text": "Working.", "cache": str(root)})
+                self.assertTrue(pcm)
+                [wav] = root.rglob("*.wav")
+                self.assertEqual(self.mode(wav), 0o600)
+                for folder in (Path(d, "a"), root, root / "chunks", wav.parent):
+                    self.assertEqual(self.mode(folder), 0o700, folder)
+                m = Path(d, "model")
+                m.mkdir()
+                (m / "config.json").write_text("{}")
+                say.model_id(m, root / "model-id.json")
+                self.assertEqual(self.mode(root / "model-id.json"), 0o600)
+                self.assertEqual([f.name for f in root.rglob("*.tmp")], [])
+        finally:
+            os.umask(old)
+
+    def test_a_cache_folder_open_to_others_is_refused_and_nothing_is_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d, "cache")
+            root.mkdir(mode=0o755)
+            root.chmod(0o755)
+            with self.assertRaises(say.Unavailable):
+                say.ChunkCache(root)
+            voice = FakeVoice()
+            self.assertTrue(serve(voice, {"text": "Working.", "cache": str(root)}))
+            self.assertEqual(serve.events[0][0], "cache_refused")
+            self.assertEqual(list(root.iterdir()), [])
+            old = os.environ.get("SHIPS_COMPUTER_CACHE")
+            os.environ["SHIPS_COMPUTER_CACHE"] = str(root)
+            try:
+                with unittest.mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                    self.assertIsNone(say.private_cache_dir())
+                self.assertIn("not private", err.getvalue())
+            finally:
+                if old is None:
+                    os.environ.pop("SHIPS_COMPUTER_CACHE")
+                else:
+                    os.environ["SHIPS_COMPUTER_CACHE"] = old
+
+    def test_a_cache_folder_owned_by_another_user_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d, "cache")
+            root.mkdir(mode=0o700)
+            me = os.getuid()
+            with unittest.mock.patch.object(say.os, "getuid", return_value=me + 1):
+                with self.assertRaises(say.Unavailable):
+                    say.ChunkCache(root)
+
+    def test_a_cached_file_writable_by_others_is_not_played(self):
+        with tempfile.TemporaryDirectory() as d:
+            voice = FakeVoice()
+            serve(voice, {"text": "Working.", "cache": d})
+            [wav] = Path(d).rglob("*.wav")
+            wav.chmod(0o666)
+            serve(voice, {"text": "Working.", "cache": d})
+            self.assertEqual(len(voice.calls), 2)
 
 
 def tone(seconds, rate, rms_db, silence=0.0):
