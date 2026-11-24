@@ -25,7 +25,7 @@ did not change is replayed, not regenerated. With --out, each chunk is also
 brought to the same speech level before it is joined to the next.
 
 Voice seed: every chunk of every line is sampled from one fixed seed (plus
---take), so one voice holds across texts. The default is Antares, seed 4077.
+--take). The default is Antares, seed 4077.
 --voice-seed (or SHIPS_COMPUTER_VOICE_SEED) picks another: a number or a name
 from voices.tsv next to this file; "text" goes back to a seed taken from each
 chunk's text. The seed is part of the render cache's key.

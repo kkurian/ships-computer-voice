@@ -2,7 +2,9 @@
 #
 # Format: name<TAB>seed<TAB>note, one per line; # starts a comment. Names are
 # case-insensitive; seeds are 0 to 2**32-1. A voice seed is the sampling seed for
-# every chunk of every line, so a chosen take holds across texts.
+# every chunk of every line. On three short lines tried with four seeds, the
+# centroid and pitch moved more with the text than with the seed: the notes below
+# describe that one passage, not every line.
 #
 # Antares is the default voice (say.py DEFAULT_VOICE_SEED), chosen by ear over
 # four blind listening rounds.
